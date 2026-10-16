@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Datos y salidas
+data/
+*.mp4
+*.mov
+*.avi
+outputs/
