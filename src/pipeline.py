@@ -348,3 +348,91 @@ def graficar(df, param, ruta=None, ax=None):
         if ruta is not None:
             fig.savefig(ruta, dpi=110)
         plt.close(fig)
+
+
+def graficar_comparacion(df, suavizado_s=0.7, estimulo=None):
+    import matplotlib.pyplot as plt
+
+    t = df["tiempo_s"].to_numpy()
+    d = df["diametro_px_limpio"].to_numpy()
+
+    # Suavizado adicional, solo para visualizar
+    dt = np.median(np.diff(t))
+    ventana = max(5, int(round(suavizado_s / dt)) | 1)
+    max_ventana = len(d) if len(d) % 2 else len(d) - 1
+    ventana = min(ventana, max_ventana)
+
+    suave = (
+        savgol_filter(d, ventana, polyorder=2)
+        if ventana >= 5 else d.copy()
+    )
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    fig.canvas.manager.set_window_title("Análisis pupilar")
+
+    ax.plot(
+        t, df["diametro_px"],
+        color="0.75", linewidth=1, label="Original",
+    )
+    ax.plot(
+    t, d,
+    color="tab:blue", linewidth=1.2,
+    label="Limpia", zorder=3,
+    )
+
+    ax.plot(
+        t, suave,
+        color="darkorange", linewidth=2.5,
+        alpha=0.4,
+        label=f"Suavizada ({suavizado_s} s)",
+        zorder=2,
+    )
+
+    malos = df["valido"] == 0
+    ax.scatter(
+        t[malos], df.loc[malos, "diametro_px"],
+        color="red", marker="x", s=20,
+        label="Inválidos", zorder=3,
+    )
+
+    ax.set(
+        title="Diámetro pupilar a lo largo del tiempo",
+        xlabel="Tiempo (s)",
+        ylabel="Diámetro pupilar (px)",
+    )
+    if estimulo is not None:
+        t_estimulo, _, tipo = estimulo
+
+        ax.axvline(
+            t_estimulo,
+            color="purple",
+            linestyle="--",
+            label=f"Cambio de luz ({tipo})",
+        )
+
+    # Mostrar el brillo en una segunda ventana
+    fig_brillo, ax_brillo = plt.subplots(figsize=(11, 3))
+    fig_brillo.canvas.manager.set_window_title("Detección del estímulo")
+
+    ax_brillo.plot(t, df["brillo"], color="goldenrod")
+
+    if estimulo is not None:
+        ax_brillo.axvline(
+            t_estimulo,
+            color="purple",
+            linestyle="--",
+            label=f"Cambio detectado: {t_estimulo:.2f} s",
+        )
+        ax_brillo.legend()
+
+    ax_brillo.set(
+        title="Brillo promedio del video",
+        xlabel="Tiempo (s)",
+        ylabel="Intensidad media",
+    )
+    ax_brillo.grid(alpha=0.3)
+    fig_brillo.tight_layout()
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    plt.show()
