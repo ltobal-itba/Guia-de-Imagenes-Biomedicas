@@ -6,4 +6,7 @@ ROOT = Path(__file__).parent
 DATA_DIR = ROOT / "data"
 
 # Video a procesar (CAMBIAR ACÁ)
-VIDEO_PATH = DATA_DIR / "A1.mp4"
+VIDEO_PATH = DATA_DIR / "A3.mp4"
+
+# Carpeta donde el pipeline guarda los resultados (CSV, gráficos)
+OUTPUT_DIR = ROOT / "outputs"
