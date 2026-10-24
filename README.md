@@ -170,4 +170,3 @@ Por lo tanto, los resultados permiten evaluar la concordancia puntual entre las 
 
 Además, los videos utilizados para la validación también fueron empleados durante el desarrollo y ajuste del algoritmo, por lo que los resultados corresponden a una evaluación interna y no a una validación sobre datos independientes.
 
-Como trabajo futuro, se propone ampliar la cantidad de fotogramas evaluados, incorporar videos independientes y analizar específicamente el impacto de los artefactos visuales sobre la precisión de la segmentación.
