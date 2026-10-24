@@ -188,15 +188,65 @@ def limpiar_curva(df, ventana_s=0.5, n_mad=3.0, ajuste_min=0.6, ventana_suavizad
     if valido.sum() < 5:
         df["diametro_px_limpio"] = np.nan
         df["area_px_limpia"] = np.nan
+        df["interpolado"] = 0
         return df
 
+    
+    # Interpolación entre mediciones válidas
     d_interp = np.interp(t, t[valido], d[valido])
-    ventana = max(int(round(ventana_suavizado_s / dt)) | 1, 5)
-    d_suave = savgol_filter(d_interp, ventana, 2)
+
+    # Evitamos extrapolar antes de la primera medición válida
+    # y después de la última
+    indices_validos = np.flatnonzero(valido)
+
+    d_interp[:indices_validos[0]] = np.nan
+    d_interp[indices_validos[-1] + 1:] = np.nan
+
+    # Las interrupciones largas se conservan sin estimación
+    # Solo interpolamos huecos de hasta 0.5 segundos
+    max_hueco_s = 0.5
+
+    for inicio, fin in zip(indices_validos[:-1], indices_validos[1:]):
+        if t[fin] - t[inicio] > max_hueco_s:
+            d_interp[inicio + 1:fin] = np.nan
+
+    # Suavizado por tramos, sin atravesar huecos largos
+    d_suave = np.full(len(d_interp), np.nan)
+    disponibles = np.isfinite(d_interp)
+
+    cambios = np.diff(
+        np.r_[False, disponibles, False].astype(int)
+    )
+    comienzos = np.flatnonzero(cambios == 1)
+    finales = np.flatnonzero(cambios == -1)
+
+    ventana_base = max(
+        int(round(ventana_suavizado_s / dt)) | 1, 5
+    )
+
+    for inicio, fin in zip(comienzos, finales):
+        tramo = d_interp[inicio:fin]
+
+        ventana = min(
+            ventana_base,
+            len(tramo) if len(tramo) % 2 else len(tramo) - 1
+        )
+
+        if ventana >= 5:
+            d_suave[inicio:fin] = savgol_filter(
+                tramo, ventana, 2
+            )
+        else:
+            d_suave[inicio:fin] = tramo
+
+    # Guardamos resultados y señalamos valores interpolados
     df["diametro_px_limpio"] = d_suave
     df["area_px_limpia"] = np.pi * d_suave ** 2 / 4
-    return df
+    df["interpolado"] = (
+        ~valido & np.isfinite(d_suave)
+    ).astype(int)
 
+    return df
 
 # 5) Estímulo y parámetros fisiológicos
 
@@ -211,86 +261,266 @@ def detectar_estimulo(t, brillo, margen=3):
     return float(t[i + 1]), i + 1, ("A" if salto[i] > 0 else "B")
 
 
+
 def calcular_parametros(df, tipo="auto", ventana_basal_s=1.0, ventana_respuesta_s=6.0):
-    # Parámetros del reflejo a partir de la curva limpia de diámetro.
-    #  - Basal: mediana del diámetro en el segundo previo al cambio de luz (frames válidos).
-    #  - Extremo: mínimo (registro A, en los 6 s siguientes) o máximo (registro B, hasta el final).
-    #  - Amplitud: |extremo - basal|, en diámetro, en área y en % del basal.
-    #  - Latencia: tiempo desde el cambio de luz hasta que el diámetro se aparta del basal más
-    #    que max(3 desvíos del basal, 10 % de la amplitud) y se mantiene así al menos 0,3 s.
-    #  - Velocidades: derivada del diámetro suavizado. Constricción = máxima velocidad de
-    #    achicamiento; redilatación = máxima velocidad de agrandamiento (en A, la posterior al mínimo).
-    t = df["tiempo_s"].to_numpy()
-    d = df["diametro_px_limpio"].to_numpy()
-    d_val = np.where(df["valido"].to_numpy() == 1, df["diametro_px"].to_numpy(dtype=float), np.nan)
-    t_est, i_est, tipo_det = detectar_estimulo(t, df["brillo"].to_numpy())
+    # Cálculo de parámetros fisiológicos considerando posibles
+    # intervalos sin mediciones confiables (NaN).
+
+    t = df["tiempo_s"].to_numpy(dtype=float)
+    d = df["diametro_px_limpio"].to_numpy(dtype=float)
+    d_original = df["diametro_px"].to_numpy(dtype=float)
+    valido = df["valido"].to_numpy() == 1
+
+    t_est, i_est, tipo_det = detectar_estimulo(
+        t, df["brillo"].to_numpy()
+    )
     tipo = tipo_det if tipo == "auto" else tipo
-    signo = -1 if tipo == "A" else 1           # A: el diámetro baja; B: el diámetro sube
-
-    antes = (t >= t_est - ventana_basal_s) & (t < t_est)
-    if np.isfinite(d_val[antes]).sum() < 3:
-        antes = t < t_est
-    basal = float(np.nanmedian(d_val[antes])) if np.isfinite(d_val[antes]).any() else float(d[i_est])
-    ruido = float(np.nanstd(d_val[antes])) if np.isfinite(d_val[antes]).sum() > 2 else 0.0
-
-    # El extremo se busca sobre la curva filtrada con una mediana de 1 s, para que un error
-    # puntual que haya sobrevivido a la limpieza no se tome como el mínimo o el máximo.
-    # En A la constricción se completa en pocos segundos (ventana de 6 s); en B la
-    # redilatación es lenta y se busca hasta el final del registro.
+    signo = -1 if tipo == "A" else 1
     dt = np.median(np.diff(t))
-    d_lento = pd.Series(d).rolling(max(int(1 / dt) | 1, 3), center=True, min_periods=1).median().to_numpy()
-    fin_ventana = t_est + ventana_respuesta_s if tipo == "A" else t[-1]
-    despues = np.flatnonzero((t >= t_est) & (t <= fin_ventana))
-    i_ext = int(despues[np.argmin(d_lento[despues])] if signo == -1 else despues[np.argmax(d_lento[despues])])
-    extremo = float(d_lento[i_ext])
-    amplitud = abs(extremo - basal)
 
-    # La respuesta tiene que sostenerse al menos 0,3 s para contar como inicio (no un pico aislado)
-    umbral = max(3 * ruido, 0.10 * amplitud)
-    supera = (signo * (d - basal) > umbral) & (np.arange(len(t)) >= i_est)
-    n_sostener = max(int(round(0.3 / dt)), 1)
-    sostenido = np.convolve(supera.astype(int), np.ones(n_sostener, int), mode="full")[n_sostener - 1:] == n_sostener
-    candidatos = np.flatnonzero(sostenido[:i_ext + 1])
-    i_ini = int(candidatos[0]) if candidatos.size else i_est
-    latencia = float(t[i_ini] - t_est)
-
-    v = np.gradient(d, t)
-    if tipo == "A":
-        v_constr = float(-v[i_est:i_ext + 1].min()) if i_ext > i_est else np.nan
-        v_redil = float(v[i_ext:].max()) if len(t) - i_ext > 3 else np.nan
-    else:
-        v_constr = np.nan                       # en B no hay constricción después del estímulo
-        v_redil = float(v[i_est:i_ext + 1].max()) if i_ext > i_est else np.nan
-    v_media = amplitud / (t[i_ext] - t[i_ini]) if t[i_ext] > t[i_ini] else np.nan
-
-    def r(x, n=2):
+    def redondear(x, n=2):
         return round(float(x), n) if np.isfinite(x) else np.nan
+
+    # Valores predeterminados si no hay datos suficientes
+    basal = extremo = amplitud = np.nan
+    latencia = t_extremo = np.nan
+    v_constr = v_redil = v_media = np.nan
+    ruido = np.nan
+
+    # 1. Diámetro basal: mediciones válidas antes del estímulo
+    antes = (
+        (t >= t_est - ventana_basal_s)
+        & (t < t_est)
+        & valido
+        & np.isfinite(d_original)
+    )
+
+    if antes.sum() >= 3:
+        basal = float(np.median(d_original[antes]))
+        ruido = float(np.std(d_original[antes]))
+
+    # 2. Buscar extremo en la ventana de respuesta
+    fin = t_est + ventana_respuesta_s if tipo == "A" else t[-1]
+
+    ventana = (
+        (t >= t_est)
+        & (t <= fin)
+        & np.isfinite(d)
+    )
+
+    if np.isfinite(basal) and ventana.sum() >= 5:
+
+        ancho_mediana = max(int(round(1.0 / dt)) | 1, 3)
+
+        d_lento = pd.Series(d).rolling(
+            ancho_mediana,
+            center=True,
+            min_periods=1
+        ).median().to_numpy()
+
+        # Solo considerar extremos con medición limpia disponible
+        candidatos = np.flatnonzero(
+            ventana & np.isfinite(d_lento)
+        )
+
+        if tipo == "A":
+            i_ext = candidatos[np.argmin(d_lento[candidatos])]
+        else:
+            i_ext = candidatos[np.argmax(d_lento[candidatos])]
+
+        extremo = float(d_lento[i_ext])
+        t_extremo = float(t[i_ext])
+
+        # Comprobar que la respuesta tenga la dirección esperada
+        cambio = signo * (extremo - basal)
+
+        if cambio > 0:
+            amplitud = cambio
+
+            # 3. Latencia
+            umbral = max(3 * ruido, 0.10 * amplitud)
+            supera = (
+                (signo * (d - basal) > umbral)
+                & np.isfinite(d)
+                & (t >= t_est)
+            )
+
+            n_sostener = max(int(round(0.3 / dt)), 1)
+
+            # Primer bloque consecutivo que supera el umbral
+            contador = 0
+            i_inicio = None
+
+            for i in range(i_est, i_ext + 1):
+                contador = contador + 1 if supera[i] else 0
+
+                if contador >= n_sostener:
+                    i_inicio = i - n_sostener + 1
+                    break
+
+            if i_inicio is not None:
+                latencia = float(t[i_inicio] - t_est)
+
+            # 4. Velocidades: derivadas solo en tramos continuos
+            velocidad = np.full(len(d), np.nan)
+
+            disponibles = np.isfinite(d)
+            cambios = np.diff(
+                np.r_[False, disponibles, False].astype(int)
+            )
+
+            comienzos = np.flatnonzero(cambios == 1)
+            finales = np.flatnonzero(cambios == -1)
+
+            for inicio, final in zip(comienzos, finales):
+                if final - inicio >= 3:
+                    velocidad[inicio:final] = np.gradient(
+                        d[inicio:final],
+                        t[inicio:final]
+                    )
+
+            if tipo == "A":
+                tramo = velocidad[i_est:i_ext + 1]
+                if np.isfinite(tramo).any():
+                    v_constr = float(-np.nanmin(tramo))
+
+                tramo = velocidad[i_ext:]
+                if np.isfinite(tramo).any():
+                    v_redil = float(np.nanmax(tramo))
+
+            else:
+                tramo = velocidad[i_est:i_ext + 1]
+                if np.isfinite(tramo).any():
+                    v_redil = float(np.nanmax(tramo))
+
+            if i_inicio is not None and t[i_ext] > t[i_inicio]:
+                v_media = amplitud / (t[i_ext] - t[i_inicio])
+
+    # 5. Resultados
+    area_basal = np.pi * basal**2 / 4
+    area_extremo = np.pi * extremo**2 / 4
 
     return {
         "tipo_registro": tipo,
-        "t_estimulo_s": r(t_est, 3),
-        "latencia_s": r(latencia, 3),
-        "t_extremo_s": r(t[i_ext], 3),
-        "diametro_basal_px": r(basal),
-        "diametro_extremo_px": r(extremo),
-        "amplitud_diametro_px": r(amplitud),
-        "area_basal_px": r(np.pi * basal ** 2 / 4, 1),
-        "area_extremo_px": r(np.pi * extremo ** 2 / 4, 1),
-        "amplitud_area_px": r(abs(np.pi * (basal ** 2 - extremo ** 2) / 4), 1),
-        "amplitud_relativa_pct": r(100 * amplitud / basal, 1),
-        "vel_constriccion_max_px_s": r(v_constr),
-        "vel_redilatacion_max_px_s": r(v_redil),
-        "vel_media_respuesta_px_s": r(v_media),
-        "frames_invalidos_pct": r(100 * (1 - df["valido"].mean()), 1),
-        "duracion_s": r(t[-1] - t[0]),
-        "fps_medio": r((len(t) - 1) / (t[-1] - t[0])),
+        "t_estimulo_s": redondear(t_est, 3),
+        "latencia_s": redondear(latencia, 3),
+        "t_extremo_s": redondear(t_extremo, 3),
+        "diametro_basal_px": redondear(basal),
+        "diametro_extremo_px": redondear(extremo),
+        "amplitud_diametro_px": redondear(amplitud),
+        "area_basal_px": redondear(area_basal, 1),
+        "area_extremo_px": redondear(area_extremo, 1),
+        "amplitud_area_px": redondear(
+            abs(area_basal - area_extremo), 1
+        ),
+        "amplitud_relativa_pct": redondear(
+            100 * amplitud / basal
+        ) if np.isfinite(basal) and basal > 0 else np.nan,
+        "vel_constriccion_max_px_s": redondear(v_constr),
+        "vel_redilatacion_max_px_s": redondear(v_redil),
+        "vel_media_respuesta_px_s": redondear(v_media),
+        "frames_invalidos_pct": redondear(
+            100 * (1 - df["valido"].mean()), 1
+        ),
+        "duracion_s": redondear(t[-1] - t[0]),
+        "fps_medio": redondear(
+            (len(t) - 1) / (t[-1] - t[0])
+        ),
     }
+
+
+
+def evaluar_calidad(df, parametros):
+    """
+    Evalúa por separado la calidad técnica y las
+    advertencias relacionadas con la respuesta fisiológica.
+
+    Estos controles son orientativos y no sustituyen
+    la validación contra mediciones manuales.
+    """
+
+    t = df["tiempo_s"].to_numpy(dtype=float)
+    d = df["diametro_px_limpio"].to_numpy(dtype=float)
+    valido = df["valido"].to_numpy() == 1
+
+    t_est = parametros["t_estimulo_s"]
+    basal = parametros["diametro_basal_px"]
+    latencia = parametros["latencia_s"]
+    amplitud = parametros["amplitud_diametro_px"]
+
+    # 1. Calidad técnica
+    cobertura = float(np.isfinite(d).mean())
+    porcentaje_invalidos = 100 * (1 - valido.mean())
+
+    if cobertura < 0.7:
+        calidad_tecnica = "insuficiente"
+    elif porcentaje_invalidos > 10:
+        calidad_tecnica = "revisar"
+    else:
+        calidad_tecnica = "cobertura_adecuada"
+
+    # 2. Advertencias fisiológicas
+    advertencias = []
+
+    if not all(np.isfinite(x) for x in
+               [t_est, basal, latencia, amplitud]):
+        advertencias.append(
+            "Parámetros fisiológicos no estimables"
+        )
+    else:
+        if latencia > 1.5:
+            advertencias.append(
+                "Latencia elevada: revisar inicio de respuesta"
+            )
+
+        # Tendencia del diámetro antes del estímulo
+        antes = (
+            (t >= t_est - 1.0)
+            & (t < t_est)
+            & valido
+            & np.isfinite(d)
+        )
+
+        if antes.sum() >= 5:
+            pendiente = np.polyfit(
+                t[antes], d[antes], 1
+            )[0]
+
+            if abs(pendiente) > 3:
+                advertencias.append(
+                    "Tendencia importante antes del estímulo"
+                )
+
+        if t_est < 0.5 or t_est > t[-1] - 0.5:
+            advertencias.append(
+                "Estímulo cercano al extremo del video"
+            )
+
+    if advertencias:
+        estado_fisiologico = "revisar"
+        motivo = "; ".join(advertencias)
+    else:
+        estado_fisiologico = "sin_alertas_automaticas"
+        motivo = "Sin advertencias en los controles aplicados"
+
+    return calidad_tecnica, estado_fisiologico, motivo
 
 
 # 6) Todo junto
 
-COLUMNAS_CURVA = ["tiempo_s", "area_px", "diametro_px", "valido", "area_px_limpia",
-                  "diametro_px_limpio", "brillo", "cx", "cy", "ajuste_rayos"]
+COLUMNAS_CURVA = [
+    "tiempo_s",
+    "area_px",
+    "diametro_px",
+    "valido",
+    "interpolado",
+    "area_px_limpia",
+    "diametro_px_limpio",
+    "brillo",
+    "cx",
+    "cy",
+    "ajuste_rayos"
+]
 
 
 def analizar_video(video_path, carpeta_salida, tipo="auto", mm_por_px=None, progreso=True):
@@ -303,6 +533,15 @@ def analizar_video(video_path, carpeta_salida, tipo="auto", mm_por_px=None, prog
         print(f"Procesando {video_path.name}")
     df = limpiar_curva(procesar_video(video_path, progreso=progreso))
     param = {"video": video_path.name, **calcular_parametros(df, tipo=tipo)}
+    
+    # Evaluación automática de calidad
+    calidad, estado, motivo = evaluar_calidad(df, param)
+
+    param["calidad_tecnica"] = calidad
+    param["estado_fisiologico"] = estado
+    param["motivo_revision"] = motivo
+
+
 
     columnas = list(COLUMNAS_CURVA)
     if mm_por_px:
