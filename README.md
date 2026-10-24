@@ -106,13 +106,13 @@ En cada imagen se delimitó manualmente la región pupilar utilizando una selecc
 
 A partir del área medida, se calculó el diámetro equivalente suponiendo una geometría circular:
 
-\[
+$$
 D = 2\sqrt{\frac{A}{\pi}}
-\]
+$$
 
 Donde:
-- \(D\): diámetro pupilar equivalente, en píxeles.
-- \(A\): área pupilar medida manualmente, en píxeles cuadrados.
+- $D$: diámetro pupilar equivalente, en píxeles.
+- $A$: área pupilar medida manualmente, en píxeles cuadrados.
 
 Los diámetros manuales se compararon con los valores obtenidos por el algoritmo en los mismos fotogramas, utilizando la columna `diametro_px` de los archivos `*_curva.csv`, correspondiente a las mediciones anteriores al suavizado temporal.
 
@@ -131,15 +131,15 @@ Para cuantificar las diferencias entre ambos métodos, se calcularon las siguien
 
 **Error absoluto:**
 
-\[
+$$
 E_a = |D_{manual} - D_{automatico}|
-\]
+$$
 
 **Error relativo porcentual:**
 
-\[
+$$
 E_r = \frac{|D_{manual} - D_{automatico}|}{D_{manual}}\times100
-\]
+$$
 
 ### Métricas globales
 
