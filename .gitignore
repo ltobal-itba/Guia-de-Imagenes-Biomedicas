@@ -225,3 +225,5 @@ data/
 *.mov
 *.avi
 outputs/
+resultados/
+.vscode/
